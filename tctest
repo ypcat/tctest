@@ -1,0 +1,152 @@
+#!/usr/bin/python
+
+import sys
+import re
+import string
+import subprocess
+
+def read_src(argv):
+    src = open(argv[1]).read()
+    return src
+
+def parse_pdef(src):
+    """Returns dict like:
+       {"class":"PairingPawns",
+        "method":"savedPawnCount",
+        "parameters":["vector <int>"],
+        "returns":"int",
+        "signature":"int savedPawnCount(vector <int> start)"}
+    """
+    m = re.search(r"""
+        DEFINITION\n
+        Class:(?P<class>[^\n]+)\n
+        Method:(?P<method>[^\n]+)\n
+        Parameters:(?P<parameters>[^\n]+)\n
+        Returns:(?P<returns>[^\n]+)\n
+        Method\ signature:(?P<signature>[^\n]+)\n
+    """, src, re.VERBOSE)
+    pdef = m.groupdict()
+    pdef['parameters'] = map(string.strip, pdef['parameters'].split(','))
+    return pdef
+
+def parse_tests(src, pdef):
+    """Returns list like: [{'input': ['{0,2}'], 'output': '1'}, ...]"""
+    tests = []
+    for test in re.split(r"\n\d+\)\n", src)[1:]:
+        i, o = re.split(r"\n\n+", test)[:2]
+        inputs = []
+        output = o[9:].strip()
+        i = i.strip()
+        for p in pdef['parameters']:
+            if p.startswith('vector'):
+                n = re.search("}$", i, re.MULTILINE).start()
+                t, i = i[:n+1], i[n+1:]
+                t = t.replace('\n', ' ')
+                i = i.strip()
+                inputs.append(t)
+            else:
+                n = re.search("$", i, re.MULTILINE).start()
+                t, i = i[:n+1], i[n+1:]
+                inputs.append(t)
+        tests.append({'input':inputs, 'output':output})
+    return tests
+
+def gen_vardecl(vartype, varname, varexpr):
+    if vartype == 'int' or vartype == 'string' or vartype == 'long long':
+        code = "%s %s = %s;\n" % (vartype, varname, varexpr)
+    elif vartype == 'vector <int>' or vartype == 'vector <string>':
+        elmtype = re.search('vector <(\w+)>', vartype).group(1)
+        code = """%(t)s _%(n)s[] = %(e)s;
+        vector<%(t)s> %(n)s(_%(n)s, _%(n)s + sizeof(_%(n)s) / sizeof(%(t)s));
+        """ % {'n':varname, 'e':varexpr, 't':elmtype}
+    return code
+
+def gen_argsdecl(pdef, test):
+    code = ""
+    for i, (vartype, varexpr) in enumerate(zip(pdef['parameters'], test['input'])):
+        varname = "arg%d" % i
+        code += gen_vardecl(vartype, varname, varexpr)
+    return code
+
+def gen_argscall(pdef):
+    code = ', '.join('arg%d' % i for i, p in enumerate(pdef['parameters']))
+    return code
+
+def gen_verify(i, vartype, resname, ansname):
+    if vartype == 'int' or vartype == 'string' or vartype == 'long long':
+        code = """
+        if(%(a)s != %(r)s){
+            cout << "Test %(i)d failed: expected " << %(a)s << " got " << %(r)s << endl << endl;
+        }
+        else{
+            cout << "Test %(i)d passed" << endl << endl;
+        }
+        """ % {'a':ansname, 'r':resname, 'i':i}
+    elif vartype == 'vector <int>' or vartype == 'vector <string>':
+        code = """
+        int i = 0;
+        while(i < %(a)s.size() && i < %(r)s.size() && %(a)s[i] == %(r)s[i]) i++;
+        if(i < %(a)s.size() || i < %(r)s.size()){
+            cout << "Test %(i)d failed: expected\\n\\t";
+            for(int j = 0; j < %(a)s.size(); j++) cout << %(a)s[j] << " ";
+            cout << "\\n\\tgot\\n\\t";
+            for(int j = 0; j < %(r)s.size(); j++) cout << %(r)s[j] << " ";
+            cout << endl << endl;
+        }
+        else{
+            cout << "Test %(i)d passed" << endl << endl;
+        }
+        """ % {'a':ansname, 'r':resname, 'i':i}
+    return code
+
+def gen_test(i, pdef, test):
+    code = """
+    {
+        %s instance;
+        %s
+        %s result = instance.%s(%s);
+        %s
+        %s
+    }
+    """ % (
+        pdef['class'],
+        gen_argsdecl(pdef, test),
+        pdef['returns'], pdef['method'], gen_argscall(pdef),
+        gen_vardecl(pdef['returns'], 'answer', test['output']),
+        gen_verify(i, pdef['returns'], 'result', 'answer')
+    )
+    return code
+
+def gen_testcode(src):
+    pdef = parse_pdef(src)
+    tests = parse_tests(src, pdef)
+    testcases = '\n'.join([gen_test(i, pdef, test) for i, test in enumerate(tests)])
+    testcode = """
+%s
+int main(){
+    %s
+    return 0;
+}
+""" % (src, testcases)
+    return testcode
+
+def run_test(testcode):
+    src = "/tmp/test.cpp"
+    exe = "/tmp/test"
+    f = open(src, "w")
+    f.write(testcode)
+    f.close()
+    ret = subprocess.call(['g++', src, '-o', exe])
+    if(ret): return ret
+    ret = subprocess.call([exe])
+    if(ret): return ret
+
+def main(argv):
+    src = read_src(argv)
+    testcode = gen_testcode(src)
+    ret = run_test(testcode)
+    return ret
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv))
+
